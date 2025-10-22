@@ -6,7 +6,7 @@ from collections import Counter
 import io
 from datetime import datetime
 
-st.title('Dynamic Data Ranking Chart')
+st.title('The Anything Counter')
 
 st.write('Upload a CSV file to analyze and visualize column data.')
 
