@@ -16,13 +16,52 @@ uploaded_file = st.file_uploader('Choose a file', type=['csv', 'xlsx', 'xls'])
 def read_any_table(file):
     name = getattr(file, "name", "") or ""
     ext = os.path.splitext(name)[1].lower()
+
     if ext in [".xlsx", ".xls"]:
-        xls = pd.ExcelFile(file)
-        sheet = st.selectbox("Select sheet:", xls.sheet_names, index=0)
-        df = xls.parse(sheet)
-    else:
-        df = pd.read_csv(file)
-    return df
+        # Excel handling with friendly engine checks
+        if ext == ".xlsx":
+            try:
+                import openpyxl  # noqa: F401
+            except ImportError:
+                st.error(
+                    "Reading .xlsx requires the **openpyxl** package.\n\n"
+                    "Install it with:\n\n`pip install openpyxl`\n\n"
+                    "Or add to requirements.txt: `openpyxl>=3.1.2`"
+                )
+                st.stop()
+            engine = "openpyxl"
+        else:  # .xls
+            try:
+                import xlrd  # noqa: F401
+                # xlrd>=2.0 dropped .xls; 1.2.0 is needed
+                if tuple(int(x) for x in xlrd.__version__.split(".")[:2]) >= (2, 0):
+                    raise ImportError(
+                        "xlrd>=2.0 no longer supports .xls. Install xlrd==1.2.0."
+                    )
+            except ImportError:
+                st.error(
+                    "Reading legacy .xls requires **xlrd==1.2.0**.\n\n"
+                    "Install with:\n\n`pip install xlrd==1.2.0`\n\n"
+                    "Or add to requirements.txt: `xlrd==1.2.0`"
+                )
+                st.stop()
+            engine = "xlrd"
+
+        try:
+            xls = pd.ExcelFile(file, engine=engine)
+            sheet = st.selectbox("Select sheet:", xls.sheet_names, index=0)
+            df = pd.read_excel(file, sheet_name=sheet, engine=engine)
+            return df
+        except Exception as e:
+            st.exception(e)
+            st.stop()
+
+    # Default to CSV
+    try:
+        return pd.read_csv(file)
+    except UnicodeDecodeError:
+        # Fallback encoding
+        return pd.read_csv(file, encoding="latin-1")
 
 if uploaded_file is not None:
     df = read_any_table(uploaded_file)
@@ -41,7 +80,6 @@ if uploaded_file is not None:
 
         # Perform counting
         if explode_option:
-            # Explode comma-separated values
             value_list = []
             for val in df[count_column].dropna():
                 items = [item.strip() for item in str(val).split(',') if item.strip()]
@@ -49,7 +87,6 @@ if uploaded_file is not None:
             value_counts = Counter(value_list)
             ranking_data = {k: {'count': v, 'total_amount': 0} for k, v in value_counts.items()}
         else:
-            # Count without exploding; keep NaNs visible as empty string
             value_counts = df[count_column].value_counts(dropna=False).to_dict()
             ranking_data = {
                 ('' if (isinstance(k, float) and pd.isna(k)) else k): {'count': v, 'total_amount': 0}
@@ -70,16 +107,38 @@ if uploaded_file is not None:
 
         sum_column = st.selectbox('Select column to sum:', numeric_columns)
 
-        # Perform aggregation; keep NaNs visible as empty string
-        grouped = df.groupby(group_column, dropna=False)[sum_column].sum().to_dict()
+        # ---- Robust grouping to avoid TypeError on mixed types ----
+        # Coerce sum column to numeric (already numeric per select, but safe)
+        sum_series = pd.to_numeric(df[sum_column], errors='coerce')
+
+        # Build safe, consistent group keys (hashable + single dtype)
+        def _safe_group_key(x):
+            # Convert unhashable (e.g., list) to string; keep NaN as NaN for dropna handling
+            if pd.isna(x):
+                return x
+            try:
+                hash(x)
+                return x
+            except TypeError:
+                return str(x)
+
+        group_keys_raw = df[group_column].map(_safe_group_key)
+        # Cast to string to avoid mixed-type sorting/factorization issues
+        group_keys = group_keys_raw.astype(str).fillna('')
+
+        # Group using the Series.groupby path; disable sorting to avoid mixed type sorting
+        grouped_series = sum_series.groupby(group_keys, sort=False).sum()
+        grouped = grouped_series.to_dict()
+
         ranking_data = {
             ('' if (isinstance(k, float) and pd.isna(k)) else k): {'count': 0, 'total_amount': v}
             for k, v in grouped.items()
         }
 
         ranking_by = 'Total Amount'
+        # ----------------------------------------------------------
 
-    # Initial list for exclusions (before any custom sort)
+    # Initial list for exclusions
     all_values = list(ranking_data.keys())
 
     # Exclusion multiselect
@@ -105,10 +164,10 @@ if uploaded_file is not None:
 
     # Determine sort keys and values according to ranking_by
     def value_key(item):
-        k, v = item
+        _, v = item
         return v['count'] if ranking_by == 'Count' else v['total_amount']
 
-    # Number input for top N (after exclusion and possible custom)
+    # Number input for top N
     max_available = len(filtered_data)
     top_n = st.number_input(
         'Number of top values to display:',
@@ -122,16 +181,14 @@ if uploaded_file is not None:
         reverse_flag = (rank_mode == "Highest first")
         sorted_items = sorted(filtered_data.items(), key=value_key, reverse=reverse_flag)
         top_items = sorted_items[:top_n]
-        labels = [str(k) for k, _ in top_items]
+        labels = [str(k) if str(k) != "" else "(blank)" for k, _ in top_items]
         values = [v['count'] if ranking_by == 'Count' else v['total_amount'] for _, v in top_items]
-        highlight_top = True  # default highlight behaviour
+        highlight_top = True
     else:
-        # Custom order: present an editable rank table
         st.markdown("**Custom order**: Edit the `Rank` column to set the display order (1 = top).")
-        # Default order by current value (highest first) then label
         default_order = sorted(filtered_data.items(), key=lambda x: (-value_key(x), str(x[0]).lower()))
         df_order = pd.DataFrame({
-            "Label": [str(k) for k, _ in default_order],
+            "Label": [("(blank)" if str(k) == "" else str(k)) for k, _ in default_order],
             ranking_by: [(v['count'] if ranking_by == 'Count' else v['total_amount']) for _, v in default_order],
             "Rank": list(range(1, len(default_order) + 1))
         })
@@ -145,18 +202,18 @@ if uploaded_file is not None:
             },
             hide_index=True,
         )
-        # Sort by user-defined rank then fallback to label to stabilise ties
         edited = edited.sort_values(by=["Rank", "Label"], ascending=[True, True])
         edited_top = edited.head(top_n)
         labels = edited_top["Label"].astype(str).tolist()
-        # Map labels back to values
-        value_map = {str(k): (v['count'] if ranking_by == 'Count' else v['total_amount']) for k, v in filtered_data.items()}
-        values = [value_map.get(lbl, 0) for lbl in labels]
-        highlight_top = False  # in custom mode, all bars same colour
+        # Map labels back to original keys (treat "(blank)" as empty string)
+        inv_map = {("(blank)" if str(k) == "" else str(k)): (v['count'] if ranking_by == 'Count' else v['total_amount'])
+                   for k, v in filtered_data.items()}
+        values = [inv_map.get(lbl, 0) for lbl in labels]
+        highlight_top = False  # custom mode: same colour for all bars
 
     chart_title = st.text_input('Chart title:', value=f'Top {top_n} by {ranking_by}')
 
-    # Function to format values to 3 significant figures (money style if summing)
+    # Format function
     def format_value(value, is_amount=False):
         if is_amount:
             if value == 0:
@@ -181,7 +238,10 @@ if uploaded_file is not None:
                 elif value >= 10: return f'£{value:.1f}'
                 else: return f'£{value:.2f}'
         else:
-            return f'{int(value):,}'
+            try:
+                return f'{int(value):,}'
+            except Exception:
+                return str(value)
 
     # Matplotlib styling
     mpl.rcParams['svg.fonttype'] = 'none'
@@ -195,32 +255,26 @@ if uploaded_file is not None:
     fig, ax = plt.subplots(figsize=(10, 6))
     max_value = max(values) if values else 0
 
-    # Background bars (for scale reference)
     ax.barh(y_pos, [max_value] * len(values), color='#E0E0E0', alpha=1.0, height=0.8)
 
-    # Foreground bars
     base_color = '#A4A2F2'
     top_color = '#4B4897'
     for i, (y, value) in enumerate(zip(y_pos, values)):
         color = (top_color if (highlight_top and i == 0) else base_color)
         ax.barh(y, float(value), color=color, height=0.8)
 
-    # Hide axes elements
     ax.set_yticks([])
     for spine in ax.spines.values():
         spine.set_visible(False)
     ax.xaxis.set_visible(False)
     ax.tick_params(axis='y', which='both', length=0)
 
-    # Label placement (convert a small point offset to data coords)
     offset_points = 5.67
     try:
-        # convert points to data units approximately
         offset_data = offset_points * (max_value / (ax.get_window_extent().width * 72 / fig.dpi))
     except Exception:
         offset_data = max_value * 0.01 if max_value else 0.05
 
-    # Text labels
     for i, (label, value) in enumerate(zip(labels, values)):
         text_color = 'white' if (highlight_top and i == 0) else 'black'
         ax.text(offset_data, y_pos[i], str(label),
