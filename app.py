@@ -69,7 +69,7 @@ if uploaded_file is not None:
     # Choose analysis type
     analysis_type = st.radio('Select analysis type:', ['Count Values', 'Sum Values'], horizontal=True)
 
-    is_money = False  # default; only used in Sum Values mode
+    is_money = False  # only used in Sum Values mode
 
     if analysis_type == 'Count Values':
         # Column selection for counting
@@ -111,7 +111,7 @@ if uploaded_file is not None:
         is_money = st.toggle("Treat summed values as money (£)?", value=True,
                              help="If turned off, values are shown with no formatting.")
 
-        # ---- Robust grouping to avoid TypeError on mixed types ----
+        # Robust grouping (handles mixed/unhashable group keys)
         sum_series = pd.to_numeric(df[sum_column], errors='coerce')
 
         def _safe_group_key(x):
@@ -135,7 +135,6 @@ if uploaded_file is not None:
         }
 
         ranking_by = 'Total Amount'
-        # ----------------------------------------------------------
 
     # Initial list for exclusions
     all_values = list(ranking_data.keys())
@@ -157,11 +156,11 @@ if uploaded_file is not None:
     # Ranking mode
     rank_mode = st.radio(
         "Ranking mode",
-        ["Highest first", "Lowest first", "Custom order"],
+        ["Highest first", "Lowest first", "Custom order (drag & drop)"],
         help="Choose how to order the bars."
     )
 
-    # Determine sort keys and values according to ranking_by
+    # Determine sort keys/values according to ranking_by
     def value_key(item):
         _, v = item
         return v['count'] if ranking_by == 'Count' else v['total_amount']
@@ -184,29 +183,57 @@ if uploaded_file is not None:
         values = [v['count'] if ranking_by == 'Count' else v['total_amount'] for _, v in top_items]
         highlight_top = True
     else:
-        st.markdown("**Custom order**: Edit the `Rank` column to set the display order (1 = top).")
+        st.markdown("**Custom order (drag & drop)**: Drag items to reorder; top = first in the list.")
+
+        # Default list ordered by value desc then label
         default_order = sorted(filtered_data.items(), key=lambda x: (-value_key(x), str(x[0]).lower()))
-        df_order = pd.DataFrame({
-            "Label": [("(blank)" if str(k) == "" else str(k)) for k, _ in default_order],
-            ranking_by: [(v['count'] if ranking_by == 'Count' else v['total_amount']) for _, v in default_order],
-            "Rank": list(range(1, len(default_order) + 1))
-        })
-        edited = st.data_editor(
-            df_order,
-            num_rows="fixed",
-            use_container_width=True,
-            column_config={
-                "Label": st.column_config.TextColumn(disabled=True),
-                "Rank": st.column_config.NumberColumn(min_value=1, max_value=len(default_order), step=1),
-            },
-            hide_index=True,
-        )
-        edited = edited.sort_values(by=["Rank", "Label"], ascending=[True, True])
-        edited_top = edited.head(top_n)
-        labels = edited_top["Label"].astype(str).tolist()
-        inv_map = {("(blank)" if str(k) == "" else str(k)): (v['count'] if ranking_by == 'Count' else v['total_amount'])
-                   for k, v in filtered_data.items()}
-        values = [inv_map.get(lbl, 0) for lbl in labels]
+        default_labels = [("(blank)" if str(k) == "" else str(k)) for k, _ in default_order]
+
+        sorted_labels = None
+        drag_worked = False
+        # Try to use streamlit-sortables; graceful fallback if not available
+        try:
+            from streamlit_sortables import sort_items  # pip install streamlit-sortables
+            # You can pass custom CSS via custom_style=... if you want
+            sorted_labels = sort_items(default_labels)
+            drag_worked = isinstance(sorted_labels, list) and len(sorted_labels) == len(default_labels)
+        except Exception as e:
+            st.info(
+                "Drag & drop requires the `streamlit-sortables` package. "
+                "Add `streamlit-sortables>=0.3.1` to your requirements to enable it. "
+                "Falling back to editable rank table."
+            )
+
+        if drag_worked:
+            # Use the dragged order, then trim to top_n
+            label_to_value = {("(blank)" if str(k) == "" else str(k)): (v['count'] if ranking_by == 'Count' else v['total_amount'])
+                              for k, v in filtered_data.items()}
+            labels = sorted_labels[:top_n]
+            values = [label_to_value.get(lbl, 0) for lbl in labels]
+        else:
+            # Fallback: editable rank table
+            df_order = pd.DataFrame({
+                "Label": default_labels,
+                ranking_by: [(v['count'] if ranking_by == 'Count' else v['total_amount']) for _, v in default_order],
+                "Rank": list(range(1, len(default_order) + 1))
+            })
+            edited = st.data_editor(
+                df_order,
+                num_rows="fixed",
+                use_container_width=True,
+                column_config={
+                    "Label": st.column_config.TextColumn(disabled=True),
+                    "Rank": st.column_config.NumberColumn(min_value=1, max_value=len(default_order), step=1),
+                },
+                hide_index=True,
+            )
+            edited = edited.sort_values(by=["Rank", "Label"], ascending=[True, True])
+            edited_top = edited.head(top_n)
+            labels = edited_top["Label"].astype(str).tolist()
+            inv_map = {("(blank)" if str(k) == "" else str(k)): (v['count'] if ranking_by == 'Count' else v['total_amount'])
+                       for k, v in filtered_data.items()}
+            values = [inv_map.get(lbl, 0) for lbl in labels]
+
         highlight_top = False  # custom mode: same colour for all bars
 
     chart_title = st.text_input('Chart title:', value=f'Top {top_n} by {ranking_by}')
