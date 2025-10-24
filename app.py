@@ -21,7 +21,6 @@ def read_any_table(file):
         sheet = st.selectbox("Select sheet:", xls.sheet_names, index=0)
         df = xls.parse(sheet)
     else:
-        # default to CSV
         df = pd.read_csv(file)
     return df
 
@@ -50,10 +49,12 @@ if uploaded_file is not None:
             value_counts = Counter(value_list)
             ranking_data = {k: {'count': v, 'total_amount': 0} for k, v in value_counts.items()}
         else:
-            # Count without exploding
+            # Count without exploding; keep NaNs visible as empty string
             value_counts = df[count_column].value_counts(dropna=False).to_dict()
-            # make NaN explicit for display consistency
-            ranking_data = {('' if (isinstance(k, float) and pd.isna(k)) else k): {'count': v, 'total_amount': 0} for k, v in value_counts.items()}
+            ranking_data = {
+                ('' if (isinstance(k, float) and pd.isna(k)) else k): {'count': v, 'total_amount': 0}
+                for k, v in value_counts.items()
+            }
 
         ranking_by = 'Count'
 
@@ -69,10 +70,12 @@ if uploaded_file is not None:
 
         sum_column = st.selectbox('Select column to sum:', numeric_columns)
 
-        # Perform aggregation
+        # Perform aggregation; keep NaNs visible as empty string
         grouped = df.groupby(group_column, dropna=False)[sum_column].sum().to_dict()
-        # make NaN explicit for display consistency
-        ranking_data = {('' if (isinstance(k, float) and pd.isna(k)) else k): {'count': 0, 'total_amount': v} for k, v in grouped.items()}
+        ranking_data = {
+            ('' if (isinstance(k, float) and pd.isna(k)) else k): {'count': 0, 'total_amount': v}
+            for k, v in grouped.items()
+        }
 
         ranking_by = 'Total Amount'
 
@@ -125,23 +128,22 @@ if uploaded_file is not None:
     else:
         # Custom order: present an editable rank table
         st.markdown("**Custom order**: Edit the `Rank` column to set the display order (1 = top).")
-        # Default order by current value (highest first) then label, but user can edit
+        # Default order by current value (highest first) then label
         default_order = sorted(filtered_data.items(), key=lambda x: (-value_key(x), str(x[0]).lower()))
         df_order = pd.DataFrame({
             "Label": [str(k) for k, _ in default_order],
-            ranking_by: [ (v['count'] if ranking_by == 'Count' else v['total_amount']) for _, v in default_order ],
+            ranking_by: [(v['count'] if ranking_by == 'Count' else v['total_amount']) for _, v in default_order],
             "Rank": list(range(1, len(default_order) + 1))
         })
-        # Make the Rank editable integers
         edited = st.data_editor(
             df_order,
             num_rows="fixed",
             use_container_width=True,
             column_config={
                 "Label": st.column_config.TextColumn(disabled=True),
-                "Rank": st.column_config.NumberColumn(min_value=1, max_value=len(default_order), step=1)
-            ],
-            hide_index=True
+                "Rank": st.column_config.NumberColumn(min_value=1, max_value=len(default_order), step=1),
+            },
+            hide_index=True,
         )
         # Sort by user-defined rank then fallback to label to stabilise ties
         edited = edited.sort_values(by=["Rank", "Label"], ascending=[True, True])
@@ -201,7 +203,7 @@ if uploaded_file is not None:
     top_color = '#4B4897'
     for i, (y, value) in enumerate(zip(y_pos, values)):
         color = (top_color if (highlight_top and i == 0) else base_color)
-        ax.barh(y, value, color=color, height=0.8)
+        ax.barh(y, float(value), color=color, height=0.8)
 
     # Hide axes elements
     ax.set_yticks([])
@@ -212,20 +214,15 @@ if uploaded_file is not None:
 
     # Label placement (convert a small point offset to data coords)
     offset_points = 5.67
-    # Avoid divide-by-zero if figure metrics not ready; fall back to small fraction
     try:
+        # convert points to data units approximately
         offset_data = offset_points * (max_value / (ax.get_window_extent().width * 72 / fig.dpi))
     except Exception:
-        offset_data = max_value * 0.01
+        offset_data = max_value * 0.01 if max_value else 0.05
 
     # Text labels
     for i, (label, value) in enumerate(zip(labels, values)):
-        # In custom mode, keep all text black; otherwise top row is white on dark bar
-        if highlight_top and i == 0:
-            text_color = 'white'
-        else:
-            text_color = 'black'
-
+        text_color = 'white' if (highlight_top and i == 0) else 'black'
         ax.text(offset_data, y_pos[i], str(label),
                 fontsize=13, ha='left', va='center', fontweight='normal', color=text_color)
         ax.text(max_value - offset_data, y_pos[i],
