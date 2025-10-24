@@ -6,7 +6,7 @@ import matplotlib as mpl
 import io, os
 from datetime import datetime
 
-st.set_page_config(page_title="Anything Counter + Industries/Buzzwords", layout="wide")
+st.set_page_config(page_title="Ranklin", layout="wide")
 st.title("Anything Counter + Industries/Buzzwords")
 st.write("Upload a CSV or Excel file. Choose Industries/Buzzwords mode for Beauhurst-style wide columns, or use the generic Anything Counter.")
 
@@ -154,13 +154,13 @@ def offer_downloads(fig, labels, values, chart_title, value_header="Value"):
     """, unsafe_allow_html=True)
 
     # --- Render stacked buttons with captions ---
-    st.markdown('<p class="download-caption">For Adobe</p>', unsafe_allow_html=True)
+    st.markdown('<p class="download-caption">For Adobe 🧑🏼‍🎨</p>', unsafe_allow_html=True)
     st.download_button("Download Chart as SVG", svg_buffer, file_name=f"{chart_title}.svg", mime="image/svg+xml")
 
-    st.markdown('<p class="download-caption">For Google Slides</p>', unsafe_allow_html=True)
+    st.markdown('<p class="download-caption">For Google Slides 📈</p>', unsafe_allow_html=True)
     st.download_button("Download Chart as PNG", png_buffer, file_name=f"{chart_title}.png", mime="image/png")
 
-    st.markdown('<p class="download-caption">For Tableau</p>', unsafe_allow_html=True)
+    st.markdown('<p class="download-caption">For Tableau 🫣</p>', unsafe_allow_html=True)
     st.download_button("Download Data as CSV", csv_bytes, file_name=f"{chart_title}_data.csv", mime="text/csv")
 
 
