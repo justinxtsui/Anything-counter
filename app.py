@@ -35,9 +35,7 @@ def read_any_table(file):
                 import xlrd  # noqa: F401
                 # xlrd>=2.0 dropped .xls; 1.2.0 is needed
                 if tuple(int(x) for x in xlrd.__version__.split(".")[:2]) >= (2, 0):
-                    raise ImportError(
-                        "xlrd>=2.0 no longer supports .xls. Install xlrd==1.2.0."
-                    )
+                    raise ImportError("xlrd>=2.0 no longer supports .xls. Install xlrd==1.2.0.")
             except ImportError:
                 st.error(
                     "Reading legacy .xls requires **xlrd==1.2.0**.\n\n"
@@ -109,8 +107,9 @@ if uploaded_file is not None:
 
         sum_column = st.selectbox('Select column to sum:', numeric_columns)
 
-        # NEW: user chooses if the summed values are money
-        is_money = st.toggle("Treat summed values as money (£)?", value=True, help="If turned off, values are shown with no formatting.")
+        # Money toggle
+        is_money = st.toggle("Treat summed values as money (£)?", value=True,
+                             help="If turned off, values are shown with no formatting.")
 
         # ---- Robust grouping to avoid TypeError on mixed types ----
         sum_series = pd.to_numeric(df[sum_column], errors='coerce')
@@ -255,20 +254,24 @@ if uploaded_file is not None:
     fig, ax = plt.subplots(figsize=(10, 6))
     max_value = max(values) if values else 0
 
+    # Background bars (for scale reference)
     ax.barh(y_pos, [max_value] * len(values), color='#E0E0E0', alpha=1.0, height=0.8)
 
+    # Foreground bars
     base_color = '#A4A2F2'
     top_color = '#4B4897'
     for i, (y, value) in enumerate(zip(y_pos, values)):
         color = (top_color if (highlight_top and i == 0) else base_color)
         ax.barh(y, float(value), color=color, height=0.8)
 
+    # Hide axes elements
     ax.set_yticks([])
     for spine in ax.spines.values():
         spine.set_visible(False)
     ax.xaxis.set_visible(False)
     ax.tick_params(axis='y', which='both', length=0)
 
+    # Label placement (convert a small point offset to data coords)
     offset_points = 5.67
     try:
         offset_data = offset_points * (max_value / (ax.get_window_extent().width * 72 / fig.dpi))
@@ -285,8 +288,11 @@ if uploaded_file is not None:
             if is_money:
                 value_text = format_money_gbp(value)
             else:
-                # show exactly as the raw number (no formatting)
-                value_text = str(value)
+                # Show raw number, drop .0 if it's a whole number
+                if isinstance(value, (int, float)) and float(value).is_integer():
+                    value_text = f"{int(value)}"
+                else:
+                    value_text = f"{value}"
 
         ax.text(offset_data, y_pos[i], str(label),
                 fontsize=13, ha='left', va='center', fontweight='normal', color=text_color)
