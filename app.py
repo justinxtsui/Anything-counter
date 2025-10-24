@@ -71,6 +71,8 @@ if uploaded_file is not None:
     # Choose analysis type
     analysis_type = st.radio('Select analysis type:', ['Count Values', 'Sum Values'], horizontal=True)
 
+    is_money = False  # default; only used in Sum Values mode
+
     if analysis_type == 'Count Values':
         # Column selection for counting
         count_column = st.selectbox('Select column to count:', df.columns.tolist())
@@ -107,13 +109,13 @@ if uploaded_file is not None:
 
         sum_column = st.selectbox('Select column to sum:', numeric_columns)
 
+        # NEW: user chooses if the summed values are money
+        is_money = st.toggle("Treat summed values as money (£)?", value=True, help="If turned off, values are shown with no formatting.")
+
         # ---- Robust grouping to avoid TypeError on mixed types ----
-        # Coerce sum column to numeric (already numeric per select, but safe)
         sum_series = pd.to_numeric(df[sum_column], errors='coerce')
 
-        # Build safe, consistent group keys (hashable + single dtype)
         def _safe_group_key(x):
-            # Convert unhashable (e.g., list) to string; keep NaN as NaN for dropna handling
             if pd.isna(x):
                 return x
             try:
@@ -123,10 +125,8 @@ if uploaded_file is not None:
                 return str(x)
 
         group_keys_raw = df[group_column].map(_safe_group_key)
-        # Cast to string to avoid mixed-type sorting/factorization issues
         group_keys = group_keys_raw.astype(str).fillna('')
 
-        # Group using the Series.groupby path; disable sorting to avoid mixed type sorting
         grouped_series = sum_series.groupby(group_keys, sort=False).sum()
         grouped = grouped_series.to_dict()
 
@@ -205,7 +205,6 @@ if uploaded_file is not None:
         edited = edited.sort_values(by=["Rank", "Label"], ascending=[True, True])
         edited_top = edited.head(top_n)
         labels = edited_top["Label"].astype(str).tolist()
-        # Map labels back to original keys (treat "(blank)" as empty string)
         inv_map = {("(blank)" if str(k) == "" else str(k)): (v['count'] if ranking_by == 'Count' else v['total_amount'])
                    for k, v in filtered_data.items()}
         values = [inv_map.get(lbl, 0) for lbl in labels]
@@ -213,35 +212,36 @@ if uploaded_file is not None:
 
     chart_title = st.text_input('Chart title:', value=f'Top {top_n} by {ranking_by}')
 
-    # Format function
-    def format_value(value, is_amount=False):
-        if is_amount:
-            if value == 0:
-                return '£0'
-            if value >= 1_000_000_000:
-                formatted = value / 1_000_000_000
-                if formatted >= 100: return f'£{formatted:.0f}b'
-                elif formatted >= 10: return f'£{formatted:.1f}b'
-                else: return f'£{formatted:.2f}b'
-            elif value >= 1_000_000:
-                formatted = value / 1_000_000
-                if formatted >= 100: return f'£{formatted:.0f}m'
-                elif formatted >= 10: return f'£{formatted:.1f}m'
-                else: return f'£{formatted:.2f}m'
-            elif value >= 1_000:
-                formatted = value / 1_000
-                if formatted >= 100: return f'£{formatted:.0f}k'
-                elif formatted >= 10: return f'£{formatted:.1f}k'
-                else: return f'£{formatted:.2f}k'
-            else:
-                if value >= 100: return f'£{value:.0f}'
-                elif value >= 10: return f'£{value:.1f}'
-                else: return f'£{value:.2f}'
+    # Money formatter (only used when is_money=True)
+    def format_money_gbp(value):
+        if value == 0 or pd.isna(value):
+            return '£0'
+        if value >= 1_000_000_000:
+            formatted = value / 1_000_000_000
+            if formatted >= 100: return f'£{formatted:.0f}b'
+            elif formatted >= 10: return f'£{formatted:.1f}b'
+            else: return f'£{formatted:.2f}b'
+        elif value >= 1_000_000:
+            formatted = value / 1_000_000
+            if formatted >= 100: return f'£{formatted:.0f}m'
+            elif formatted >= 10: return f'£{formatted:.1f}m'
+            else: return f'£{formatted:.2f}m'
+        elif value >= 1_000:
+            formatted = value / 1_000
+            if formatted >= 100: return f'£{formatted:.0f}k'
+            elif formatted >= 10: return f'£{formatted:.1f}k'
+            else: return f'£{formatted:.2f}k'
         else:
-            try:
-                return f'{int(value):,}'
-            except Exception:
-                return str(value)
+            if value >= 100: return f'£{value:.0f}'
+            elif value >= 10: return f'£{value:.1f}'
+            else: return f'£{value:.2f}'
+
+    # Count formatter (commas)
+    def format_count(n):
+        try:
+            return f"{int(n):,}"
+        except Exception:
+            return str(n)
 
     # Matplotlib styling
     mpl.rcParams['svg.fonttype'] = 'none'
@@ -275,12 +275,23 @@ if uploaded_file is not None:
     except Exception:
         offset_data = max_value * 0.01 if max_value else 0.05
 
+    # Value label text (money vs raw vs count)
     for i, (label, value) in enumerate(zip(labels, values)):
         text_color = 'white' if (highlight_top and i == 0) else 'black'
+
+        if ranking_by == 'Count':
+            value_text = format_count(value)
+        else:
+            if is_money:
+                value_text = format_money_gbp(value)
+            else:
+                # show exactly as the raw number (no formatting)
+                value_text = str(value)
+
         ax.text(offset_data, y_pos[i], str(label),
                 fontsize=13, ha='left', va='center', fontweight='normal', color=text_color)
         ax.text(max_value - offset_data, y_pos[i],
-                format_value(value, is_amount=(ranking_by == 'Total Amount')),
+                value_text,
                 fontsize=13, ha='right', va='center', fontweight='semibold', color=text_color)
 
     ax.set_title(chart_title, fontsize=15, pad=20, fontweight='normal')
