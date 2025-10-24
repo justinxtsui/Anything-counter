@@ -109,79 +109,63 @@ def plot_bar(labels, values, title, highlight_first=True, right_formatter=int_co
     return fig
 
 
-def offer_downloads(fig, labels, values, chart_title, value_header="Value", layout="stack"):
-    """Unified export with captions."""
+def offer_downloads(fig, labels, values, chart_title, value_header="Value"):
+    """Unified export with bold captions + colorful large buttons."""
+    import io
+    import pandas as pd
+    import streamlit as st
+
+    # Export files
     svg_buffer = io.BytesIO()
     fig.savefig(svg_buffer, format="svg", bbox_inches="tight")
     svg_buffer.seek(0)
-
     png_buffer = io.BytesIO()
     fig.savefig(png_buffer, format="png", dpi=300, bbox_inches="tight")
     png_buffer.seek(0)
-
     df_out = pd.DataFrame({"Label": labels, value_header: values})
     csv_bytes = df_out.to_csv(index=False).encode("utf-8")
 
-    def render_buttons():
-        st.caption("For Adobe")
-        st.download_button(
-            label="Download Chart as SVG",
-            data=svg_buffer,
-            file_name=f"{chart_title.replace(' ', '_').lower()}.svg",
-            mime="image/svg+xml",
-            use_container_width=True,
-        )
-        st.caption("For Google Slides")
-        st.download_button(
-            label="Download Chart as PNG",
-            data=png_buffer,
-            file_name=f"{chart_title.replace(' ', '_').lower()}.png",
-            mime="image/png",
-            use_container_width=True,
-        )
-        st.caption("For Tableau")
-        st.download_button(
-            label="Download Data as CSV",
-            data=csv_bytes,
-            file_name=f"{chart_title.replace(' ', '_').lower()}_data.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
+    # --- CSS styling for pretty large buttons ---
+    st.markdown("""
+        <style>
+        .download-caption {
+            font-weight: 700;
+            font-size: 1.1rem;
+            color: #1E1E1E;
+            margin-top: 1rem;
+            margin-bottom: 0.4rem;
+        }
+        div[data-testid="stDownloadButton"] button {
+            background-color: #4B4897;
+            color: white !important;
+            font-weight: 600;
+            font-size: 1rem;
+            border: none;
+            border-radius: 8px;
+            padding: 0.8rem 1rem;
+            width: 100%;
+            transition: all 0.2s ease-in-out;
+        }
+        div[data-testid="stDownloadButton"] button:hover {
+            background-color: #6A67E5;
+            transform: translateY(-2px);
+        }
+        </style>
+    """, unsafe_allow_html=True)
 
-    if layout == "columns":
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.caption("For Adobe")
-            st.download_button(
-                label="Download Chart as SVG",
-                data=svg_buffer,
-                file_name=f"{chart_title.replace(' ', '_').lower()}.svg",
-                mime="image/svg+xml",
-                use_container_width=True,
-            )
-        with c2:
-            st.caption("For Google Slides")
-            st.download_button(
-                label="Download Chart as PNG",
-                data=png_buffer,
-                file_name=f"{chart_title.replace(' ', '_').lower()}.png",
-                mime="image/png",
-                use_container_width=True,
-            )
-        with c3:
-            st.caption("For Tableau")
-            st.download_button(
-                label="Download Data as CSV",
-                data=csv_bytes,
-                file_name=f"{chart_title.replace(' ', '_').lower()}_data.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
-    else:
-        render_buttons()
+    # --- Render stacked buttons with captions ---
+    st.markdown('<p class="download-caption">For Adobe</p>', unsafe_allow_html=True)
+    st.download_button("Download Chart as SVG", svg_buffer, file_name=f"{chart_title}.svg", mime="image/svg+xml")
 
-# ---------- Industries/Buzzwords helpers ----------
-def detect_layout(df: pd.DataFrame):
+    st.markdown('<p class="download-caption">For Google Slides</p>', unsafe_allow_html=True)
+    st.download_button("Download Chart as PNG", png_buffer, file_name=f"{chart_title}.png", mime="image/png")
+
+    st.markdown('<p class="download-caption">For Tableau</p>', unsafe_allow_html=True)
+    st.download_button("Download Data as CSV", csv_bytes, file_name=f"{chart_title}_data.csv", mime="text/csv")
+
+
+# ---------- Helper functions ----------
+def detect_layout(df):
     cols = list(df.columns.astype(str))
     ind_single = "Industries" if "Industries" in cols else ("(Company) Industries" if "(Company) Industries" in cols else None)
     buzz_single = "Buzzwords" if "Buzzwords" in cols else ("(Company) Buzzwords" if "(Company) Buzzwords" in cols else None)
@@ -207,7 +191,7 @@ def coerce_bool_df(df_bool_like: pd.DataFrame) -> pd.DataFrame:
     return out.fillna(False)
 
 
-def find_amount_columns(cols: list[str]) -> list[str]:
+def find_amount_columns(cols):
     lc = [c.lower() for c in cols]
     candidates = []
     for i, c in enumerate(lc):
@@ -215,16 +199,10 @@ def find_amount_columns(cols: list[str]) -> list[str]:
             candidates.append(cols[i])
         if "total amount received by the company" in c and "converted to gbp" in c:
             candidates.append(cols[i])
-    seen, out = set(), []
-    for c in candidates:
-        if c not in seen:
-            seen.add(c)
-            out.append(c)
-    return out
+    return list(dict.fromkeys(candidates))
 
 
-# ---------- Anything Counter helpers ----------
-def count_values_vectorised(series: pd.Series, explode: bool) -> pd.Series:
+def count_values_vectorised(series, explode):
     if explode:
         s = series.dropna().astype(str).str.split(",").explode().str.strip()
         s = s[s.ne("") & s.ne("nan")]
@@ -233,10 +211,11 @@ def count_values_vectorised(series: pd.Series, explode: bool) -> pd.Series:
         return series.value_counts(dropna=False)
 
 
-def group_sum_vectorised(df: pd.DataFrame, group_col: str, sum_col: str) -> pd.Series:
+def group_sum_vectorised(df, group_col, sum_col):
     vals = pd.to_numeric(df[sum_col], errors="coerce")
     keys = df[group_col].astype(str).fillna("")
     return vals.groupby(keys, sort=False).sum()
+
 
 # ========================= APP LOGIC =========================
 if uploaded_file is not None:
@@ -252,25 +231,10 @@ if uploaded_file is not None:
     if mode.endswith("Industries/Buzzwords"):
         layout = detect_layout(df)
         amount_candidates = find_amount_columns(list(df.columns.astype(str)))
-        amount_choice = None
-        if amount_candidates:
-            amount_choice = st.selectbox(
-                "Amount column (optional)",
-                ["<None>"] + amount_candidates,
-                index=0 if not amount_candidates else 1
-            )
-            if amount_choice == "<None>":
-                amount_choice = None
-
+        amount_choice = st.selectbox("Amount column (optional)", ["<None>"] + amount_candidates, index=0)
+        amount_choice = None if amount_choice == "<None>" else amount_choice
         ranking_by = st.radio("Rank by:", ["Count", "Total Amount Raised"], horizontal=True)
-        if ranking_by == "Total Amount Raised" and not amount_choice:
-            st.info("No amount column selected — totals will be £0. Choose an amount column if available.")
 
-        if layout["mode"] == "unknown":
-            st.error("Could not detect Industries/Buzzwords columns.")
-            st.stop()
-
-        # Process wide layout
         if layout["mode"] == "wide":
             ind_cols = layout.get("ind_cols", [])
             buzz_cols = layout.get("buzz_cols", [])
@@ -288,55 +252,17 @@ if uploaded_file is not None:
                 amount_per_item = (M_bool.astype(float).multiply(amt, axis=0)).sum(axis=0)
             else:
                 amount_per_item = pd.Series(0.0, index=counts.index)
-
-        # Process single layout
         else:
-            industries_col = layout["ind_col"]
-            buzzwords_col = layout["buzz_col"]
-            inds = df[industries_col].dropna().astype(str).str.split(",").explode().str.strip()
-            buzz = df[buzzwords_col].dropna().astype(str).str.split(",").explode().str.strip()
-            items = pd.concat([inds, buzz], ignore_index=True)
-            items = items[items.ne("") & items.ne("nan")]
-            counts = items.value_counts()
-            if amount_choice:
-                amt = pd.to_numeric(df[amount_choice], errors="coerce").fillna(0)
-                def explode_with_rowkey(series, keyname):
-                    s = series.where(series.notna(), "").astype(str).str.split(",")
-                    ex = s.explode().str.strip()
-                    mask = ex.ne("") & ex.ne("nan")
-                    out = pd.DataFrame({keyname: ex[mask]})
-                    out["__row__"] = np.repeat(np.arange(len(series)), s.str.len())[mask]
-                    return out
-                ex_i = explode_with_rowkey(df[industries_col], "item")
-                ex_b = explode_with_rowkey(df[buzzwords_col], "item")
-                ex = pd.concat([ex_i, ex_b], ignore_index=True)
-                ex = ex.merge(pd.DataFrame({"__row__": np.arange(len(df)), "amt": amt}), on="__row__", how="left")
-                amount_per_item = ex.groupby("item", as_index=True)["amt"].sum()
-            else:
-                amount_per_item = pd.Series(0, index=counts.index)
-
-        metric_series = counts if ranking_by == "Count" else amount_per_item
-        all_items = metric_series.sort_values(ascending=False).index.tolist()
-
-        excluded = st.multiselect("Exclude specific industries/buzzwords:", options=all_items, default=[])
-        kept = [i for i in all_items if i not in excluded]
-        if not kept:
+            st.error("Could not detect Industries/Buzzwords columns.")
             st.stop()
 
-        top_n = st.number_input("Number of top industries/buzzwords to display:", 1, len(kept), min(10, len(kept)))
-        labels = kept[:int(top_n)]
-        if ranking_by == "Count":
-            values = [int(counts.get(k, 0)) for k in labels]
-            formatter = int_commas
-            header = "Count"
-        else:
-            values = [float(amount_per_item.get(k, 0)) for k in labels]
-            formatter = money_fmt
-            header = "Amount (£)"
+        metric_series = counts if ranking_by == "Count" else amount_per_item
+        labels = metric_series.index.tolist()
+        values = metric_series.values.tolist()
 
-        chart_title = st.text_input("Chart title:", f"Top {top_n} Industries/Buzzwords by {ranking_by}")
-        fig = plot_bar(labels, values, chart_title, True, formatter)
-        offer_downloads(fig, labels, values, chart_title, header)
+        chart_title = st.text_input("Chart title:", f"Top {len(labels)} Industries/Buzzwords by {ranking_by}")
+        fig = plot_bar(labels[:10], values[:10], chart_title, True, money_fmt if ranking_by != "Count" else int_commas)
+        offer_downloads(fig, labels[:10], values[:10], chart_title, "Value")
 
     # -------------------- ANYTHING COUNTER MODE --------------------
     else:
@@ -344,39 +270,24 @@ if uploaded_file is not None:
         analysis_type = st.radio("Select analysis type:", ["Count Values", "Sum Values"], horizontal=True)
 
         if analysis_type == "Count Values":
-            count_column = st.selectbox("Select column to count:", df.columns.tolist())
-            explode_option = st.checkbox("Explode comma-separated values before counting")
-            vc = count_values_vectorised(df[count_column], explode_option)
-            ranking_data = {k: {"count": int(v)} for k, v in vc.to_dict().items()}
+            col = st.selectbox("Select column:", df.columns.tolist())
+            explode = st.checkbox("Explode comma-separated values")
+            counts = count_values_vectorised(df[col], explode)
+            labels = counts.index.tolist()
+            values = counts.values.tolist()
             ranking_by = "Count"
-        else:
-            group_column = st.selectbox("Select column to group by:", df.columns.tolist())
-            numeric_columns = df.select_dtypes(include=["number"]).columns.tolist()
-            if not numeric_columns:
-                st.warning("No numeric columns found to sum.")
-                st.stop()
-            sum_column = st.selectbox("Select column to sum:", numeric_columns)
-            is_money = st.toggle("Treat values as money (£)?", value=True)
-            summed = group_sum_vectorised(df, group_column, sum_column)
-            ranking_data = {k: {"total": v} for k, v in summed.items()}
-            ranking_by = "Total Amount"
-
-        items = list(ranking_data.keys())
-        excluded = st.multiselect("Exclude specific values:", items)
-        kept = [i for i in items if i not in excluded]
-
-        top_n = st.number_input("Number of top values:", 1, len(kept), min(10, len(kept)))
-        labels = kept[:int(top_n)]
-        values = []
-        if ranking_by == "Count":
-            values = [ranking_data[k]["count"] for k in labels]
             formatter = int_commas
-            header = "Count"
         else:
-            values = [ranking_data[k]["total"] for k in labels]
+            group_col = st.selectbox("Group by:", df.columns.tolist())
+            num_cols = df.select_dtypes(include=["number"]).columns.tolist()
+            sum_col = st.selectbox("Sum column:", num_cols)
+            is_money = st.toggle("Treat values as money (£)?", True)
+            summed = group_sum_vectorised(df, group_col, sum_col)
+            labels = summed.index.tolist()
+            values = summed.values.tolist()
+            ranking_by = "Amount (£)" if is_money else "Amount"
             formatter = money_fmt if is_money else int_commas
-            header = "Amount (£)" if is_money else "Amount"
 
-        chart_title = st.text_input("Chart title:", f"Top {top_n} by {ranking_by}")
-        fig = plot_bar(labels, values, chart_title, True, formatter)
-        offer_downloads(fig, labels, values, chart_title, header)
+        chart_title = st.text_input("Chart title:", f"Top {min(10, len(labels))} by {ranking_by}")
+        fig = plot_bar(labels[:10], values[:10], chart_title, True, formatter)
+        offer_downloads(fig, labels[:10], values[:10], chart_title, ranking_by)
