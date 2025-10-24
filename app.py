@@ -3,38 +3,49 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
-import io
-import os
+import io, os
+from collections import Counter
 from datetime import datetime
 
-st.set_page_config(page_title="Top Industries/Buzzwords Chart", layout="wide")
-st.title("Top Industries/Buzzwords Chart")
-st.write("Upload a CSV or Excel file. The app auto-detects either single columns or wide columns like `Industries - …` and `Buzzwords - …`.")
+st.set_page_config(page_title="Anything Counter + Industries/Buzzwords", layout="wide")
+st.title("Anything Counter + Industries/Buzzwords")
+st.write("Upload a CSV or Excel file. Choose Industries/Buzzwords mode for Beauhurst-style wide columns, or use the generic Anything Counter.")
 
 uploaded_file = st.file_uploader("Choose a file", type=["csv", "xlsx", "xls"])
 
-# -------------------- Helpers --------------------
+# -------------------- Shared helpers --------------------
 def read_any_table(file):
     name = getattr(file, "name", "") or ""
     ext = os.path.splitext(name)[1].lower()
+
     if ext in [".xlsx", ".xls"]:
-        engine = "openpyxl" if ext == ".xlsx" else "xlrd"
-        if engine == "xlrd":
+        if ext == ".xlsx":
+            try:
+                import openpyxl  # noqa: F401
+                engine = "openpyxl"
+            except Exception:
+                st.error("Reading .xlsx requires `openpyxl`. Install with `pip install openpyxl`.")
+                st.stop()
+        else:
             try:
                 import xlrd
                 if tuple(int(x) for x in xlrd.__version__.split(".")[:2]) >= (2, 0):
-                    st.error("Reading legacy .xls requires xlrd==1.2.0")
+                    st.error("Reading .xls requires `xlrd==1.2.0` (xlrd>=2.0 dropped .xls).")
                     st.stop()
+                engine = "xlrd"
             except Exception:
-                st.error("Reading legacy .xls requires xlrd==1.2.0")
+                st.error("Reading .xls requires `xlrd==1.2.0`.")
                 st.stop()
+
         try:
             xls = pd.ExcelFile(file, engine=engine)
             sheet = st.selectbox("Select sheet:", xls.sheet_names, index=0)
-            return pd.read_excel(file, sheet_name=sheet, engine=engine)
+            df = pd.read_excel(file, sheet_name=sheet, engine=engine)
+            return df
         except Exception as e:
             st.exception(e)
             st.stop()
+
     # CSV
     try:
         return pd.read_csv(file)
@@ -60,22 +71,6 @@ def int_commas(n) -> str:
         return f"{int(n):,}"
     except Exception:
         return str(n)
-
-def coerce_bool_df(df_bool_like: pd.DataFrame) -> pd.DataFrame:
-    """Coerce various truthy values (1, True, 'Y','Yes','✓','X', non-empty strings) to boolean."""
-    out = df_bool_like.copy()
-    # numeric -> nonzero is True
-    num_cols = out.select_dtypes(include=[np.number]).columns
-    out[num_cols] = out[num_cols].fillna(0) != 0
-
-    # remaining -> string checks
-    other_cols = [c for c in out.columns if c not in num_cols]
-    if other_cols:
-        s = out[other_cols].astype(str).str.strip().str.lower()
-        truthy = s.isin(["y", "yes", "true", "1", "✓", "✔", "x"])
-        nonempty = s.ne("") & s.ne("nan")
-        out[other_cols] = (truthy | nonempty)  # treat any non-empty as True
-    return out.fillna(False)
 
 def plot_bar(labels, values, title, highlight_first=True, right_formatter=int_commas):
     mpl.rcParams['svg.fonttype'] = 'none'
@@ -112,6 +107,33 @@ def plot_bar(labels, values, title, highlight_first=True, right_formatter=int_co
     st.pyplot(fig, use_container_width=True)
     return fig
 
+# -------------------- Industries/Buzzwords helpers --------------------
+def detect_layout(df: pd.DataFrame):
+    cols = list(df.columns.astype(str))
+    ind_single = "Industries" if "Industries" in cols else ("(Company) Industries" if "(Company) Industries" in cols else None)
+    buzz_single = "Buzzwords" if "Buzzwords" in cols else ("(Company) Buzzwords" if "(Company) Buzzwords" in cols else None)
+    ind_wide = [c for c in cols if c.startswith("Industries - ") or c.startswith("(Company) Industries - ")]
+    buzz_wide = [c for c in cols if c.startswith("Buzzwords - ") or c.startswith("(Company) Buzzwords - ")]
+    if ind_single and buzz_single:
+        return {"mode": "single", "ind_col": ind_single, "buzz_col": buzz_single}
+    if ind_wide or buzz_wide:
+        return {"mode": "wide", "ind_cols": ind_wide, "buzz_cols": buzz_wide}
+    return {"mode": "unknown"}
+
+def coerce_bool_df(df_bool_like: pd.DataFrame) -> pd.DataFrame:
+    out = df_bool_like.copy()
+    # numeric -> nonzero True
+    num_cols = out.select_dtypes(include=[np.number]).columns
+    out[num_cols] = out[num_cols].fillna(0) != 0
+    # others -> non-empty string/typical truthy markers
+    other_cols = [c for c in out.columns if c not in num_cols]
+    if other_cols:
+        s = out[other_cols].astype(str).str.strip().str.lower()
+        truthy = s.isin(["y", "yes", "true", "1", "✓", "✔", "x"])
+        nonempty = s.ne("") & s.ne("nan")
+        out[other_cols] = (truthy | nonempty)
+    return out.fillna(False)
+
 def find_amount_columns(cols: list[str]) -> list[str]:
     lc = [c.lower() for c in cols]
     candidates = []
@@ -120,7 +142,7 @@ def find_amount_columns(cols: list[str]) -> list[str]:
             candidates.append(cols[i])
         if "total amount received by the company" in c and "converted to gbp" in c:
             candidates.append(cols[i])
-    # keep order but unique
+    # unique, keep order
     seen, out = set(), []
     for c in candidates:
         if c not in seen:
@@ -128,165 +150,290 @@ def find_amount_columns(cols: list[str]) -> list[str]:
             out.append(c)
     return out
 
-def detect_layout(df: pd.DataFrame):
-    """Return dict describing detected layout."""
-    cols = list(df.columns.astype(str))
+# -------------------- Anything Counter vectorised helpers --------------------
+def count_values_vectorised(series: pd.Series, explode: bool) -> pd.Series:
+    if explode:
+        s = (
+            series.dropna()
+                  .astype(str)
+                  .str.split(",")
+                  .explode()
+                  .str.strip()
+        )
+        s = s[s.ne("") & s.ne("nan")]
+        return s.value_counts(dropna=False)
+    else:
+        return series.value_counts(dropna=False)
 
-    # long/single columns
-    ind_single = None
-    if "Industries" in cols:
-        ind_single = "Industries"
-    elif "(Company) Industries" in cols:
-        ind_single = "(Company) Industries"
+def group_sum_vectorised(df: pd.DataFrame, group_col: str, sum_col: str) -> pd.Series:
+    vals = pd.to_numeric(df[sum_col], errors="coerce")
+    keys = df[group_col].astype(str).fillna("")
+    return vals.groupby(keys, sort=False).sum()
 
-    buzz_single = None
-    if "Buzzwords" in cols:
-        buzz_single = "Buzzwords"
-    elif "(Company) Buzzwords" in cols:
-        buzz_single = "(Company) Buzzwords"
-
-    # wide/prefixed columns
-    ind_wide = [c for c in cols if c.startswith("Industries - ") or c.startswith("(Company) Industries - ")]
-    buzz_wide = [c for c in cols if c.startswith("Buzzwords - ") or c.startswith("(Company) Buzzwords - ")]
-
-    if ind_single and buzz_single:
-        return {"mode": "single", "ind_col": ind_single, "buzz_col": buzz_single}
-    if ind_wide or buzz_wide:
-        return {"mode": "wide", "ind_cols": ind_wide, "buzz_cols": buzz_wide}
-    return {"mode": "unknown"}
-
-# -------------------- App --------------------
+# ==================== APP LOGIC ====================
 if uploaded_file is not None:
     df = read_any_table(uploaded_file)
 
-    layout = detect_layout(df)
-    amount_candidates = find_amount_columns(list(df.columns.astype(str)))
-    amount_choice = None
-    if amount_candidates:
-        amount_choice = st.selectbox(
-            "Amount column (optional)",
-            ["<None>"] + amount_candidates,
-            index=0 if not amount_candidates else 1
-        )
-        if amount_choice == "<None>":
-            amount_choice = None
+    mode = st.radio(
+        "Are you ranking **Industries/Buzzwords**?",
+        ["No – use Anything Counter", "Yes – use Industries/Buzzwords"],
+        horizontal=True
+    )
 
-    ranking_by = st.radio("Rank by:", ["Count", "Total Amount Raised"], horizontal=True)
-    if ranking_by == "Total Amount Raised" and not amount_choice:
-        st.info("No amount column selected — totals will be £0. Choose an amount column if available.")
+    # -------------------- INDUSTRIES/BUZZWORDS MODE --------------------
+    if mode.endswith("Industries/Buzzwords"):
+        layout = detect_layout(df)
+        amount_candidates = find_amount_columns(list(df.columns.astype(str)))
+        amount_choice = None
+        if amount_candidates:
+            amount_choice = st.selectbox(
+                "Amount column (optional)",
+                ["<None>"] + amount_candidates,
+                index=0 if not amount_candidates else 1
+            )
+            if amount_choice == "<None>":
+                amount_choice = None
 
-    # ---- Build tallies (vectorised) ----
-    if layout["mode"] == "single":
-        industries_col = layout["ind_col"]
-        buzzwords_col  = layout["buzz_col"]
+        ranking_by = st.radio("Rank by:", ["Count", "Total Amount Raised"], horizontal=True)
+        if ranking_by == "Total Amount Raised" and not amount_choice:
+            st.info("No amount column selected — totals will be £0. Choose an amount column if available.")
 
-        # Split+explode both, combine into one series of items
-        inds = (
-            df[industries_col].dropna().astype(str).str.split(",").explode().str.strip()
-        )
-        buzz = (
-            df[buzzwords_col].dropna().astype(str).str.split(",").explode().str.strip()
-        )
-        items = pd.concat([inds, buzz], ignore_index=True)
-        items = items[items.ne("") & items.ne("nan")]
+        if layout["mode"] == "single":
+            industries_col = layout["ind_col"]
+            buzzwords_col  = layout["buzz_col"]
 
-        counts = items.value_counts()
-        if amount_choice:
-            amt = pd.to_numeric(df[amount_choice], errors="coerce").fillna(0)
-            # For each row, distribute its amount to each item present in that row
-            # Build membership per row for both columns
-            def explode_with_rowkey(series, keyname):
-                s = series.copy()
-                s = s.where(s.notna(), "")
-                s = s.astype(str).str.split(",")
-                ex = s.explode()
-                ex = ex.str.strip()
-                mask = ex.ne("") & ex.ne("nan")
-                out = pd.DataFrame({keyname: ex[mask]})
-                out["__row__"] = np.repeat(np.arange(len(series)), s.str.len())[mask]
-                return out
+            inds = df[industries_col].dropna().astype(str).str.split(",").explode().str.strip()
+            buzz = df[buzzwords_col].dropna().astype(str).str.split(",").explode().str.strip()
+            items = pd.concat([inds, buzz], ignore_index=True)
+            items = items[items.ne("") & items.ne("nan")]
 
-            ex_i = explode_with_rowkey(df[industries_col], "item")
-            ex_b = explode_with_rowkey(df[buzzwords_col], "item")
-            ex = pd.concat([ex_i, ex_b], ignore_index=True)
-            ex = ex[ex["item"].ne("")]
+            counts = items.value_counts()
 
-            ex = ex.merge(pd.DataFrame({"__row__": np.arange(len(df)), "amt": amt}), on="__row__", how="left")
-            amount_per_item = ex.groupby("item", as_index=True)["amt"].sum()
+            if amount_choice:
+                amt = pd.to_numeric(df[amount_choice], errors="coerce").fillna(0)
+                def explode_with_rowkey(series, keyname):
+                    s = series.where(series.notna(), "").astype(str).str.split(",")
+                    ex = s.explode().str.strip()
+                    mask = ex.ne("") & ex.ne("nan")
+                    out = pd.DataFrame({keyname: ex[mask]})
+                    out["__row__"] = np.repeat(np.arange(len(series)), s.str.len())[mask]
+                    return out
+                ex_i = explode_with_rowkey(df[industries_col], "item")
+                ex_b = explode_with_rowkey(df[buzzwords_col], "item")
+                ex = pd.concat([ex_i, ex_b], ignore_index=True)
+                ex = ex.merge(pd.DataFrame({"__row__": np.arange(len(df)), "amt": amt}), on="__row__", how="left")
+                amount_per_item = ex.groupby("item", as_index=True)["amt"].sum()
+            else:
+                amount_per_item = pd.Series(0, index=counts.index)
+
+        elif layout["mode"] == "wide":
+            ind_cols  = layout.get("ind_cols", [])
+            buzz_cols = layout.get("buzz_cols", [])
+
+            pieces = []
+            if ind_cols:
+                pieces.append(pd.DataFrame({c.split(" - ", 1)[1]: df[c] for c in ind_cols}))
+            if buzz_cols:
+                # If duplicate names occur between industries and buzzwords, concat will create duplicate cols; we’ll sum after coercion
+                pieces.append(pd.DataFrame({c.split(" - ", 1)[1]: df[c] for c in buzz_cols}))
+
+            M = pd.concat(pieces, axis=1)
+            # If duplicates names exist, group columns and sum
+            M = M.groupby(level=0, axis=1).sum()
+
+            M_bool = coerce_bool_df(M)
+            counts = M_bool.sum(axis=0).sort_values(ascending=False)
+
+            if amount_choice:
+                amt = pd.to_numeric(df[amount_choice], errors="coerce").fillna(0.0)
+                amount_per_item = (M_bool.astype(float).multiply(amt, axis=0)).sum(axis=0)
+            else:
+                amount_per_item = pd.Series(0.0, index=counts.index)
         else:
-            amount_per_item = pd.Series(0, index=counts.index)
-
-    elif layout["mode"] == "wide":
-        ind_cols  = layout.get("ind_cols", [])
-        buzz_cols = layout.get("buzz_cols", [])
-        if not ind_cols and not buzz_cols:
-            st.error("Could not find any columns starting with 'Industries - ' or 'Buzzwords - '.")
+            st.error("Could not detect Industries/Buzzwords columns. "
+                     "Expect either single columns ('Industries', 'Buzzwords') "
+                     "or wide columns starting with 'Industries - ' / 'Buzzwords - '.")
             st.stop()
 
-        pieces = []
-        rename_map = {}
-        if ind_cols:
-            rename_map.update({c: c.split(" - ", 1)[1] for c in ind_cols})
-            pieces.append(df[ind_cols].rename(columns=rename_map))
-        if buzz_cols:
-            rename_map.update({c: c.split(" - ", 1)[1] for c in buzz_cols})
-            pieces.append(df[buzz_cols].rename(columns={c: c.split(" - ", 1)[1] for c in buzz_cols}))
+        # Build UI + chart
+        metric_series = counts if ranking_by == "Count" else amount_per_item
+        all_items = metric_series.sort_values(ascending=False).index.tolist()
 
-        M = pd.concat(pieces, axis=1)
-        # If there are duplicate names between industries and buzzwords, keep both by grouping columns with same name
-        M = M.groupby(level=0, axis=1).sum()
+        excluded = st.multiselect("Exclude specific industries/buzzwords:", options=all_items, default=[])
+        kept = [i for i in all_items if i not in excluded]
+        if not kept:
+            st.info("Nothing to show — all values are excluded.")
+            st.stop()
 
-        M_bool = coerce_bool_df(M)
-        counts = M_bool.sum(axis=0).sort_values(ascending=False)
+        max_available = len(kept)
+        top_n = st.number_input("Number of top industries/buzzwords to display:",
+                                min_value=1, max_value=max_available, value=min(10, max_available))
 
-        if amount_choice:
-            amt = pd.to_numeric(df[amount_choice], errors="coerce").fillna(0.0)
-            # Weighted amount per item: sum over rows of amt * membership
-            amount_per_item = (M_bool.astype(float).multiply(amt, axis=0)).sum(axis=0)
+        labels = kept[:int(top_n)]
+        if ranking_by == "Count":
+            values = [int(counts.get(k, 0)) for k in labels]
+            formatter = int_commas
         else:
-            amount_per_item = pd.Series(0.0, index=counts.index)
+            values = [float(amount_per_item.get(k, 0)) for k in labels]
+            formatter = money_fmt
+
+        chart_title = st.text_input("Chart title:", value=f"Top {top_n} Industries/Buzzwords by {ranking_by}")
+        fig = plot_bar(labels, values, chart_title, highlight_first=True, right_formatter=formatter)
+
+        # Download SVG
+        svg_buffer = io.BytesIO()
+        fig.savefig(svg_buffer, format="svg", bbox_inches="tight")
+        svg_buffer.seek(0)
+        st.download_button(
+            label="Download Chart as SVG",
+            data=svg_buffer,
+            file_name=f"{chart_title.replace(' ', '_').lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.svg",
+            mime="image/svg+xml",
+        )
+
+    # -------------------- ANYTHING COUNTER MODE (original features) --------------------
     else:
-        st.error("Could not detect Industries/Buzzwords columns. "
-                 "Expect either single columns ('Industries', 'Buzzwords') "
-                 "or wide columns starting with 'Industries - ' / 'Buzzwords - '.")
-        st.stop()
+        st.subheader("Analysis Options")
+        analysis_type = st.radio("Select analysis type:", ["Count Values", "Sum Values"], horizontal=True)
 
-    # ---- Build list for UI, exclusions, top N ----
-    metric_series = counts if ranking_by == "Count" else amount_per_item
-    # Align indexes in case of differences
-    all_index = metric_series.index
-    # Sort by chosen metric
-    all_items = metric_series.sort_values(ascending=False).index.tolist()
+        if analysis_type == "Count Values":
+            count_column = st.selectbox("Select column to count:", df.columns.tolist())
+            explode_option = st.checkbox("Explode comma-separated values before counting")
 
-    excluded = st.multiselect("Exclude specific industries/buzzwords:", options=all_items, default=[])
-    filt_idx = [i for i in all_items if i not in excluded]
-    if not filt_idx:
-        st.info("Nothing to show — all values are excluded.")
-        st.stop()
+            if explode_option:
+                vc = count_values_vectorised(df[count_column], explode=True)
+                ranking_data = {k: {"count": int(v), "total_amount": 0} for k, v in vc.to_dict().items()}
+            else:
+                value_counts = df[count_column].value_counts(dropna=False).to_dict()
+                ranking_data = {
+                    ('' if (isinstance(k, float) and pd.isna(k)) else k): {'count': v, 'total_amount': 0}
+                    for k, v in value_counts.items()
+                }
+            ranking_by = 'Count'
 
-    max_available = len(filt_idx)
-    top_n = st.number_input("Number of top industries/buzzwords to display:",
-                            min_value=1, max_value=max_available, value=min(10, max_available))
+        else:
+            group_column = st.selectbox("Select column to group by (unique values):", df.columns.tolist())
+            numeric_columns = df.select_dtypes(include=['number']).columns.tolist()
+            if not numeric_columns:
+                st.warning("No numeric columns found to sum. Try 'Count Values' instead.")
+                st.stop()
+            sum_column = st.selectbox("Select column to sum:", numeric_columns)
+            is_money = st.toggle("Treat summed values as money (£)?", value=True)
 
-    top_labels = filt_idx[:int(top_n)]
-    if ranking_by == "Count":
-        top_values = [int(counts.get(k, 0)) for k in top_labels]
-        formatter = int_commas
-    else:
-        top_values = [float(amount_per_item.get(k, 0)) for k in top_labels]
-        formatter = money_fmt
+            sum_series = group_sum_vectorised(df, group_column, sum_column)
+            grouped = sum_series.to_dict()
+            ranking_data = {
+                ('' if (isinstance(k, float) and pd.isna(k)) else k): {'count': 0, 'total_amount': v}
+                for k, v in grouped.items()
+            }
+            ranking_by = 'Total Amount'
 
-    chart_title = st.text_input("Chart title:", value=f"Top {top_n} Industries/Buzzwords by {ranking_by}")
+        # Exclusions
+        all_values = list(ranking_data.keys())
+        excluded_values = st.multiselect(
+            "Exclude specific values:",
+            options=sorted(all_values, key=lambda x: str(x).lower()),
+            default=[]
+        )
+        filtered_data = {k: v for k, v in ranking_data.items() if k not in excluded_values}
+        if not filtered_data:
+            st.info("Nothing to show — all values are excluded.")
+            st.stop()
 
-    fig = plot_bar(top_labels, top_values, chart_title, highlight_first=True, right_formatter=formatter)
+        # Ranking mode (keeps your original Highest/Lowest/Custom)
+        rank_mode = st.radio(
+            "Ranking mode",
+            ["Highest first", "Lowest first", "Custom order (drag & drop)"],
+            help="Choose how to order the bars."
+        )
 
-    # Download as SVG
-    svg_buffer = io.BytesIO()
-    fig.savefig(svg_buffer, format="svg", bbox_inches="tight")
-    svg_buffer.seek(0)
-    st.download_button(
-        label="Download Chart as SVG",
-        data=svg_buffer,
-        file_name=f"{chart_title.replace(' ', '_').lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.svg",
-        mime="image/svg+xml",
-    )
+        def value_key(item):
+            _, v = item
+            return v['count'] if ranking_by == 'Count' else v['total_amount']
+
+        max_available = len(filtered_data)
+        top_n = st.number_input(
+            "Number of top values to display:",
+            min_value=1, max_value=max_available, value=min(10, max_available)
+        )
+
+        if rank_mode in ["Highest first", "Lowest first"]:
+            reverse_flag = (rank_mode == "Highest first")
+            sorted_items = sorted(filtered_data.items(), key=value_key, reverse=reverse_flag)
+            top_items = sorted_items[:top_n]
+            labels = [str(k) if str(k) != "" else "(blank)" for k, _ in top_items]
+            values = [v['count'] if ranking_by == 'Count' else v['total_amount'] for _, v in top_items]
+            highlight_top = True
+        else:
+            st.markdown("**Custom order (drag & drop)**: Drag items to reorder; top = first in the list.")
+            default_order = sorted(filtered_data.items(), key=lambda x: (-value_key(x), str(x[0]).lower()))
+            default_labels = [("(blank)" if str(k) == "" else str(k)) for k, _ in default_order]
+
+            sorted_labels, drag_worked = None, False
+            try:
+                from streamlit_sortables import sort_items  # optional dep
+                sorted_labels = sort_items(default_labels)
+                drag_worked = isinstance(sorted_labels, list) and len(sorted_labels) == len(default_labels)
+            except Exception:
+                st.info(
+                    "Drag & drop requires `streamlit-sortables`. "
+                    "Install with `pip install streamlit-sortables>=0.3.1`. Falling back to editable rank table."
+                )
+
+            if drag_worked:
+                label_to_value = {("(blank)" if str(k) == "" else str(k)): (v['count'] if ranking_by == 'Count' else v['total_amount'])
+                                  for k, v in filtered_data.items()}
+                labels = sorted_labels[:top_n]
+                values = [label_to_value.get(lbl, 0) for lbl in labels]
+            else:
+                df_order = pd.DataFrame({
+                    "Label": default_labels,
+                    ranking_by: [(v['count'] if ranking_by == 'Count' else v['total_amount']) for _, v in default_order],
+                    "Rank": list(range(1, len(default_order) + 1))
+                })
+                edited = st.data_editor(
+                    df_order,
+                    num_rows="fixed",
+                    use_container_width=True,
+                    column_config={
+                        "Label": st.column_config.TextColumn(disabled=True),
+                        "Rank": st.column_config.NumberColumn(min_value=1, max_value=len(default_order), step=1),
+                    },
+                    hide_index=True,
+                )
+                edited = edited.sort_values(by=["Rank", "Label"], ascending=[True, True])
+                edited_top = edited.head(top_n)
+                labels = edited_top["Label"].astype(str).tolist()
+                inv_map = {("(blank)" if str(k) == "" else str(k)): (v['count'] if ranking_by == 'Count' else v['total_amount'])
+                           for k, v in filtered_data.items()}
+                values = [inv_map.get(lbl, 0) for lbl in labels]
+
+            highlight_top = False
+
+        chart_title_default = (
+            f"Top {top_n} by {ranking_by}" if ranking_by == "Count" else f"Top {top_n} by Total Amount"
+        )
+        chart_title = st.text_input("Chart title:", value=chart_title_default)
+
+        # Value formatter
+        if ranking_by == "Count":
+            formatter = int_commas
+        else:
+            # money toggle supported
+            try:
+                is_money  # only exists in Sum Values branch
+                formatter = money_fmt if is_money else (lambda x: f"{int(x)}" if float(x).is_integer() else f"{x}")
+            except NameError:
+                formatter = money_fmt
+
+        fig = plot_bar(labels, values, chart_title, highlight_first=(rank_mode != "Custom order (drag & drop)"), right_formatter=formatter)
+
+        svg_buffer = io.BytesIO()
+        fig.savefig(svg_buffer, format="svg", bbox_inches="tight")
+        svg_buffer.seek(0)
+        st.download_button(
+            label="Download Chart as SVG",
+            data=svg_buffer,
+            file_name=f"{chart_title.replace(' ', '_').lower()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.svg",
+            mime="image/svg+xml",
+        )
