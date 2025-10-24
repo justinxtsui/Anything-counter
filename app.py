@@ -5,28 +5,41 @@ import matplotlib as mpl
 from collections import Counter
 import io
 from datetime import datetime
+import os
 
+st.set_page_config(page_title="The Anything Counter", layout="wide")
 st.title('The Anything Counter')
+st.write('Upload a CSV or Excel file to analyze and visualize column data.')
 
-st.write('Upload a CSV file to analyze and visualize column data.')
+uploaded_file = st.file_uploader('Choose a file', type=['csv', 'xlsx', 'xls'])
 
-uploaded_file = st.file_uploader('Choose a CSV file', type=['csv'])
+def read_any_table(file):
+    name = getattr(file, "name", "") or ""
+    ext = os.path.splitext(name)[1].lower()
+    if ext in [".xlsx", ".xls"]:
+        xls = pd.ExcelFile(file)
+        sheet = st.selectbox("Select sheet:", xls.sheet_names, index=0)
+        df = xls.parse(sheet)
+    else:
+        # default to CSV
+        df = pd.read_csv(file)
+    return df
 
 if uploaded_file is not None:
-    df = pd.read_csv(uploaded_file)
-    
+    df = read_any_table(uploaded_file)
+
     st.subheader('Analysis Options')
-    
+
     # Choose analysis type
-    analysis_type = st.radio('Select analysis type:', ['Count Values', 'Sum Values'])
-    
+    analysis_type = st.radio('Select analysis type:', ['Count Values', 'Sum Values'], horizontal=True)
+
     if analysis_type == 'Count Values':
         # Column selection for counting
         count_column = st.selectbox('Select column to count:', df.columns.tolist())
-        
+
         # Option to explode comma-separated values
         explode_option = st.checkbox('Explode comma-separated values before counting')
-        
+
         # Perform counting
         if explode_option:
             # Explode comma-separated values
@@ -34,45 +47,65 @@ if uploaded_file is not None:
             for val in df[count_column].dropna():
                 items = [item.strip() for item in str(val).split(',') if item.strip()]
                 value_list.extend(items)
-            
             value_counts = Counter(value_list)
             ranking_data = {k: {'count': v, 'total_amount': 0} for k, v in value_counts.items()}
         else:
             # Count without exploding
-            value_counts = df[count_column].value_counts().to_dict()
-            ranking_data = {k: {'count': v, 'total_amount': 0} for k, v in value_counts.items()}
-        
-        # Sort by count
-        all_values = sorted(ranking_data.keys(), key=lambda x: ranking_data[x]['count'], reverse=True)
+            value_counts = df[count_column].value_counts(dropna=False).to_dict()
+            # make NaN explicit for display consistency
+            ranking_data = {('' if (isinstance(k, float) and pd.isna(k)) else k): {'count': v, 'total_amount': 0} for k, v in value_counts.items()}
+
         ranking_by = 'Count'
-        
+
     else:  # Sum Values
         # Column selection for grouping and summing
         group_column = st.selectbox('Select column to group by (unique values):', df.columns.tolist())
-        
+
         # Get numeric columns for summing
         numeric_columns = df.select_dtypes(include=['number']).columns.tolist()
+        if not numeric_columns:
+            st.warning("No numeric columns found to sum. Please upload a dataset with numeric columns or choose 'Count Values'.")
+            st.stop()
+
         sum_column = st.selectbox('Select column to sum:', numeric_columns)
-        
+
         # Perform aggregation
-        grouped = df.groupby(group_column)[sum_column].sum().to_dict()
-        ranking_data = {k: {'count': 0, 'total_amount': v} for k, v in grouped.items()}
-        
-        # Sort by sum
-        all_values = sorted(ranking_data.keys(), key=lambda x: ranking_data[x]['total_amount'], reverse=True)
+        grouped = df.groupby(group_column, dropna=False)[sum_column].sum().to_dict()
+        # make NaN explicit for display consistency
+        ranking_data = {('' if (isinstance(k, float) and pd.isna(k)) else k): {'count': 0, 'total_amount': v} for k, v in grouped.items()}
+
         ranking_by = 'Total Amount'
-    
+
+    # Initial list for exclusions (before any custom sort)
+    all_values = list(ranking_data.keys())
+
     # Exclusion multiselect
     excluded_values = st.multiselect(
         'Exclude specific values:',
-        options=all_values,
+        options=sorted(all_values, key=lambda x: str(x).lower()),
         default=[]
     )
-    
+
     # Filter out excluded values
     filtered_data = {k: v for k, v in ranking_data.items() if k not in excluded_values}
-    
-    # Number input for top N
+
+    if not filtered_data:
+        st.info("Nothing to show — all values are excluded.")
+        st.stop()
+
+    # Ranking mode
+    rank_mode = st.radio(
+        "Ranking mode",
+        ["Highest first", "Lowest first", "Custom order"],
+        help="Choose how to order the bars."
+    )
+
+    # Determine sort keys and values according to ranking_by
+    def value_key(item):
+        k, v = item
+        return v['count'] if ranking_by == 'Count' else v['total_amount']
+
+    # Number input for top N (after exclusion and possible custom)
     max_available = len(filtered_data)
     top_n = st.number_input(
         'Number of top values to display:',
@@ -80,20 +113,48 @@ if uploaded_file is not None:
         max_value=max_available,
         value=min(10, max_available)
     )
-    
-    # Get top N from filtered data
-    if ranking_by == 'Count':
-        topN = sorted(filtered_data.items(), key=lambda x: x[1]['count'], reverse=True)[:top_n]
-        labels = [k for k, v in topN]
-        values = [v['count'] for k, v in topN]
+
+    # Build ordering
+    if rank_mode in ["Highest first", "Lowest first"]:
+        reverse_flag = (rank_mode == "Highest first")
+        sorted_items = sorted(filtered_data.items(), key=value_key, reverse=reverse_flag)
+        top_items = sorted_items[:top_n]
+        labels = [str(k) for k, _ in top_items]
+        values = [v['count'] if ranking_by == 'Count' else v['total_amount'] for _, v in top_items]
+        highlight_top = True  # default highlight behaviour
     else:
-        topN = sorted(filtered_data.items(), key=lambda x: x[1]['total_amount'], reverse=True)[:top_n]
-        labels = [str(k) for k, v in topN]
-        values = [v['total_amount'] for k, v in topN]
-    
+        # Custom order: present an editable rank table
+        st.markdown("**Custom order**: Edit the `Rank` column to set the display order (1 = top).")
+        # Default order by current value (highest first) then label, but user can edit
+        default_order = sorted(filtered_data.items(), key=lambda x: (-value_key(x), str(x[0]).lower()))
+        df_order = pd.DataFrame({
+            "Label": [str(k) for k, _ in default_order],
+            ranking_by: [ (v['count'] if ranking_by == 'Count' else v['total_amount']) for _, v in default_order ],
+            "Rank": list(range(1, len(default_order) + 1))
+        })
+        # Make the Rank editable integers
+        edited = st.data_editor(
+            df_order,
+            num_rows="fixed",
+            use_container_width=True,
+            column_config={
+                "Label": st.column_config.TextColumn(disabled=True),
+                "Rank": st.column_config.NumberColumn(min_value=1, max_value=len(default_order), step=1)
+            ],
+            hide_index=True
+        )
+        # Sort by user-defined rank then fallback to label to stabilise ties
+        edited = edited.sort_values(by=["Rank", "Label"], ascending=[True, True])
+        edited_top = edited.head(top_n)
+        labels = edited_top["Label"].astype(str).tolist()
+        # Map labels back to values
+        value_map = {str(k): (v['count'] if ranking_by == 'Count' else v['total_amount']) for k, v in filtered_data.items()}
+        values = [value_map.get(lbl, 0) for lbl in labels]
+        highlight_top = False  # in custom mode, all bars same colour
+
     chart_title = st.text_input('Chart title:', value=f'Top {top_n} by {ranking_by}')
-    
-    # Function to format values to 3 significant figures
+
+    # Function to format values to 3 significant figures (money style if summing)
     def format_value(value, is_amount=False):
         if is_amount:
             if value == 0:
@@ -119,42 +180,63 @@ if uploaded_file is not None:
                 else: return f'£{value:.2f}'
         else:
             return f'{int(value):,}'
-    
+
+    # Matplotlib styling
     mpl.rcParams['svg.fonttype'] = 'none'
     mpl.rcParams['pdf.fonttype'] = 42
     mpl.rcParams['font.family'] = 'Public Sans'
     mpl.rcParams['font.sans-serif'] = ['Public Sans', 'Arial', 'DejaVu Sans']
     mpl.rcParams['font.weight'] = 'normal'
-    
+
+    # Build chart
     y_pos = list(range(len(labels)))
     fig, ax = plt.subplots(figsize=(10, 6))
-    max_value = max(values)
-    
+    max_value = max(values) if values else 0
+
+    # Background bars (for scale reference)
     ax.barh(y_pos, [max_value] * len(values), color='#E0E0E0', alpha=1.0, height=0.8)
+
+    # Foreground bars
+    base_color = '#A4A2F2'
+    top_color = '#4B4897'
     for i, (y, value) in enumerate(zip(y_pos, values)):
-        color = '#4B4897' if i == 0 else '#A4A2F2'
+        color = (top_color if (highlight_top and i == 0) else base_color)
         ax.barh(y, value, color=color, height=0.8)
-    
+
+    # Hide axes elements
     ax.set_yticks([])
     for spine in ax.spines.values():
         spine.set_visible(False)
     ax.xaxis.set_visible(False)
     ax.tick_params(axis='y', which='both', length=0)
-    
+
+    # Label placement (convert a small point offset to data coords)
     offset_points = 5.67
-    offset_data = offset_points * (max_value / (ax.get_window_extent().width * 72 / fig.dpi))
+    # Avoid divide-by-zero if figure metrics not ready; fall back to small fraction
+    try:
+        offset_data = offset_points * (max_value / (ax.get_window_extent().width * 72 / fig.dpi))
+    except Exception:
+        offset_data = max_value * 0.01
+
+    # Text labels
     for i, (label, value) in enumerate(zip(labels, values)):
-        text_color = 'white' if i == 0 else 'black'
+        # In custom mode, keep all text black; otherwise top row is white on dark bar
+        if highlight_top and i == 0:
+            text_color = 'white'
+        else:
+            text_color = 'black'
+
         ax.text(offset_data, y_pos[i], str(label),
                 fontsize=13, ha='left', va='center', fontweight='normal', color=text_color)
-        ax.text(max_value - offset_data, y_pos[i], format_value(value, is_amount=(ranking_by == 'Total Amount')),
+        ax.text(max_value - offset_data, y_pos[i],
+                format_value(value, is_amount=(ranking_by == 'Total Amount')),
                 fontsize=13, ha='right', va='center', fontweight='semibold', color=text_color)
-    
+
     ax.set_title(chart_title, fontsize=15, pad=20, fontweight='normal')
     ax.invert_yaxis()
     plt.tight_layout()
-    st.pyplot(fig)
-    
+    st.pyplot(fig, use_container_width=True)
+
     # Download as SVG
     svg_buffer = io.BytesIO()
     fig.savefig(svg_buffer, format='svg', bbox_inches='tight')
