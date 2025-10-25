@@ -9,7 +9,7 @@ from collections import Counter
 from datetime import datetime
 
 # ========================= PAGE =========================
-st.set_page_config(page_title="Ranklin — The Anything Counter", layout="wide")
+st.set_page_config(page_title="Ranklin 🤓", layout="wide")
 st.title("Ranklin — Anything Counter + Industries/Buzzwords")
 st.write("Upload a CSV or Excel file. Use the Industries/Buzzwords mode for Beauhurst-style wide columns, or the generic Anything Counter.")
 
@@ -56,7 +56,7 @@ def read_any_table(file):
         return pd.read_csv(file, encoding="latin-1")
 
 
-def money_fmt(v: float) -> str:
+def money_fmt(v):
     if v is None or (isinstance(v, float) and np.isnan(v)) or v == 0:
         return "£0"
     if v >= 1_000_000_000:
@@ -71,7 +71,7 @@ def money_fmt(v: float) -> str:
     return f"£{v:.0f}" if v >= 100 else (f"£{v:.1f}" if v >= 10 else f"£{v:.2f}")
 
 
-def int_commas(n) -> str:
+def int_commas(n):
     try:
         return f"{int(n):,}"
     except Exception:
@@ -169,18 +169,18 @@ def _metric_map(labels, values):
 
 def _drag_order_ui(default_labels, metric_map, top_n):
     """
-    Drag-and-drop if streamlit-sortables is available;
-    otherwise fallback to an editable 'Rank' table.
-    Returns ordered (labels, values), and highlight_first flag.
+    Drag-and-drop if streamlit-sortables is available; otherwise fallback to an editable 'Rank' table.
+    Returns (labels_topN, values_topN, highlight_first, full_ordered_labels, full_ordered_values).
     """
-    # Try to use drag & drop
+    # Try drag & drop
     try:
         from streamlit_sortables import sort_items  # pip install streamlit-sortables>=0.3.1
-        sorted_labels = sort_items(default_labels)  # vertical list by default
-        if isinstance(sorted_labels, list) and len(sorted_labels) == len(default_labels):
-            ordered = sorted_labels[:top_n]
-            values = [metric_map.get(lbl, 0) for lbl in ordered]
-            return ordered, values, False
+        ordered_full = sort_items(default_labels)  # full list
+        if isinstance(ordered_full, list) and len(ordered_full) == len(default_labels):
+            values_full = [metric_map.get(lbl, 0) for lbl in ordered_full]
+            labels_top = ordered_full[:top_n]
+            values_top = values_full[:top_n]
+            return labels_top, values_top, False, ordered_full, values_full
     except Exception:
         st.info(
             "Drag & drop requires `streamlit-sortables`. "
@@ -188,7 +188,7 @@ def _drag_order_ui(default_labels, metric_map, top_n):
             "Install with: `pip install streamlit-sortables>=0.3.1`"
         )
 
-    # Fallback: editable rank table
+    # Fallback editable table
     df_order = pd.DataFrame({
         "Label": default_labels,
         "Value": [metric_map.get(lbl, 0) for lbl in default_labels],
@@ -206,9 +206,30 @@ def _drag_order_ui(default_labels, metric_map, top_n):
         hide_index=True,
     )
     edited = edited.sort_values(by=["Rank", "Label"], ascending=[True, True])
-    ordered = edited["Label"].head(top_n).tolist()
-    values = [metric_map.get(lbl, 0) for lbl in ordered]
-    return ordered, values, False
+    ordered_full = edited["Label"].tolist()
+    values_full  = edited["Value"].tolist()
+    labels_top   = ordered_full[:top_n]
+    values_top   = values_full[:top_n]
+    return labels_top, values_top, False, ordered_full, values_full
+
+
+def _warn_boundary_tie(all_labels, all_values, top_n, metric_name, fmt=lambda x: x):
+    """If the Nth and (N+1)th values are equal, show a reminder."""
+    if not all_values or top_n is None:
+        return
+    if len(all_values) <= top_n:
+        return
+    try:
+        vN = float(all_values[int(top_n) - 1])
+        vNext = float(all_values[int(top_n)])
+    except Exception:
+        return
+    if np.isfinite(vN) and np.isfinite(vNext) and vN == vNext:
+        st.info(
+            f"Note: Rank {int(top_n)} (**{all_labels[int(top_n)-1]}**) "
+            f"has the same {metric_name.lower()} as Rank {int(top_n)+1} (**{all_labels[int(top_n)]}**): {fmt(vN)}. "
+            "Consider increasing the count or using Custom (drag & drop) to break the tie."
+        )
 
 
 # ========================= APP =========================
@@ -221,7 +242,7 @@ if uploaded_file is not None:
         horizontal=True
     )
 
-    # -------------------- INDUSTRIES/BUZZWORDS --------------------
+    # -------------------- INDUSTRIES/Buzzwords --------------------
     if mode.endswith("Industries/Buzzwords"):
         layout = detect_layout(df)
         if layout["mode"] == "unknown":
@@ -297,27 +318,53 @@ if uploaded_file is not None:
         labels, values = zip(*labels_values)
         labels, values = list(labels), list(values)
 
-        # ---- Ordering
+        # ---- Ordering & Top N (stepper)
         with st.expander("Order & display", expanded=False):
             rank_mode = st.radio(
                 "Ranking mode",
                 ["Highest first", "Lowest first", "Custom (drag & drop)"],
                 horizontal=True
             )
-            top_n = st.slider("Limit to top N (applies after ordering)",
-                              1, max(10, len(labels)), min(10, len(labels)))
+            top_n = st.number_input(
+                "How many bars to show",
+                min_value=1,
+                max_value=len(labels),
+                value=min(10, len(labels)),
+                step=1,
+                help="Use the + / – buttons to adjust."
+            )
 
         formatter = money_fmt if ranking_by != "Count" else int_commas
 
         if rank_mode in ["Highest first", "Lowest first"]:
             reverse_flag = (rank_mode == "Highest first")
-            labels, values = zip(*sorted(zip(labels, values), key=lambda lv: lv[1], reverse=reverse_flag))
-            labels, values = list(labels)[:top_n], list(values)[:top_n]
+            full_labels_ordered, full_values_ordered = zip(*sorted(zip(labels, values), key=lambda lv: lv[1], reverse=reverse_flag))
+            full_labels_ordered, full_values_ordered = list(full_labels_ordered), list(full_values_ordered)
+
+            # tie reminder before slicing
+            _warn_boundary_tie(
+                full_labels_ordered,
+                full_values_ordered,
+                int(top_n),
+                ranking_by,
+                fmt=(money_fmt if ranking_by != "Count" else int_commas)
+            )
+
+            labels, values = full_labels_ordered[:int(top_n)], full_values_ordered[:int(top_n)]
             highlight_top = True
         else:
             default_labels = [lbl for lbl, _ in sorted(zip(labels, values), key=lambda lv: (-lv[1], str(lv[0]).lower()))]
             metric_map = _metric_map(labels, values)
-            labels, values, highlight_top = _drag_order_ui(default_labels, metric_map, top_n)
+            labels, values, highlight_top, full_ordered_labels, full_ordered_values = _drag_order_ui(default_labels, metric_map, int(top_n))
+
+            # tie reminder on dragged order
+            _warn_boundary_tie(
+                full_ordered_labels,
+                full_ordered_values,
+                int(top_n),
+                ranking_by,
+                fmt=(money_fmt if ranking_by != "Count" else int_commas)
+            )
 
         chart_title = st.text_input("Chart title:", f"Top {len(labels)} Industries/Buzzwords by {ranking_by}")
         fig = plot_bar(labels, values, chart_title, highlight_first=highlight_top, right_formatter=formatter)
@@ -386,25 +433,51 @@ if uploaded_file is not None:
         labels, values = zip(*labels_values)
         labels, values = list(labels), list(values)
 
-        # ---- Ordering
+        # ---- Ordering & Top N (stepper)
         with st.expander("Order & display", expanded=False):
             rank_mode = st.radio(
                 "Ranking mode",
                 ["Highest first", "Lowest first", "Custom (drag & drop)"],
                 horizontal=True
             )
-            top_n = st.slider("Limit to top N (applies after ordering)",
-                              1, max(10, len(labels)), min(10, len(labels)))
+            top_n = st.number_input(
+                "How many bars to show",
+                min_value=1,
+                max_value=len(labels),
+                value=min(10, len(labels)),
+                step=1,
+                help="Use the + / – buttons to adjust."
+            )
 
         if rank_mode in ["Highest first", "Lowest first"]:
             reverse_flag = (rank_mode == "Highest first")
-            labels, values = zip(*sorted(zip(labels, values), key=lambda lv: lv[1], reverse=reverse_flag))
-            labels, values = list(labels)[:top_n], list(values)[:top_n]
+            full_labels_ordered, full_values_ordered = zip(*sorted(zip(labels, values), key=lambda lv: lv[1], reverse=reverse_flag))
+            full_labels_ordered, full_values_ordered = list(full_labels_ordered), list(full_values_ordered)
+
+            # tie reminder before slicing
+            _warn_boundary_tie(
+                full_labels_ordered,
+                full_values_ordered,
+                int(top_n),
+                ranking_by,
+                fmt=(money_fmt if ranking_by != "Count" else int_commas)
+            )
+
+            labels, values = full_labels_ordered[:int(top_n)], full_values_ordered[:int(top_n)]
             highlight_top = True
         else:
             default_labels = [lbl for lbl, _ in sorted(zip(labels, values), key=lambda lv: (-lv[1], str(lv[0]).lower()))]
             metric_map = _metric_map(labels, values)
-            labels, values, highlight_top = _drag_order_ui(default_labels, metric_map, top_n)
+            labels, values, highlight_top, full_ordered_labels, full_ordered_values = _drag_order_ui(default_labels, metric_map, int(top_n))
+
+            # tie reminder on dragged order
+            _warn_boundary_tie(
+                full_ordered_labels,
+                full_ordered_values,
+                int(top_n),
+                ranking_by,
+                fmt=(money_fmt if ranking_by != "Count" else int_commas)
+            )
 
         chart_title = st.text_input("Chart title:", f"Top {len(labels)} by {ranking_by}")
         fig = plot_bar(labels, values, chart_title, highlight_first=highlight_top, right_formatter=formatter)
