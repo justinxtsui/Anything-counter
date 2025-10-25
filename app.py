@@ -11,7 +11,8 @@ from datetime import datetime
 # ========================= PAGE =========================
 st.set_page_config(page_title="Ranklin 🤓", layout="wide")
 st.title("Ranklin 🤓")
-st.write("Upload a CSV or Excel file. Last updated 25/10/25 -JT")
+st.write("Upload a CSV or Excel file.")
+st.write("Last updated 25/10/25 – JT")
 
 uploaded_file = st.file_uploader("Choose a file", type=["csv", "xlsx", "xls"])
 
