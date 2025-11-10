@@ -233,9 +233,53 @@ def _warn_boundary_tie(all_labels, all_values, top_n, metric_name, fmt=lambda x:
         )
 
 
+# ---------- NEW: Optional category filter ----------
+def apply_category_filter(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Let the user choose a column and filter by selected categories.
+    Returns the filtered DataFrame (or the original if no selection is made).
+    """
+    st.subheader("Optional Filter")
+    cols = [str(c) for c in df.columns]
+    if not cols:
+        return df
+
+    filter_col = st.selectbox("Filter column:", options=cols, index=0)
+    # Normalise display values (keep a mapping so we filter correctly)
+    ser_raw = df[filter_col]
+    ser_disp = ser_raw.astype(str).fillna("")
+    ser_disp = ser_disp.replace({"nan": "", "None": ""})
+
+    uniques = pd.Series(ser_disp.unique(), dtype=str)
+    uniques = uniques.fillna("")
+    # Represent blanks clearly
+    display_vals = uniques.replace({"": "(blank)"})
+    display_vals = sorted(display_vals.tolist(), key=lambda x: x.lower())
+
+    if len(display_vals) > 300:
+        st.warning("Too many unique values — showing only the first 300.")
+        display_vals = display_vals[:300]
+
+    selected_vals = st.multiselect("Select categories:", options=display_vals)
+    mode = st.radio("Filter mode:", ["Include", "Exclude"], horizontal=True)
+
+    if selected_vals:
+        # Map selected display values back to their raw equivalents for comparison
+        selected_raw = [("" if v == "(blank)" else v) for v in selected_vals]
+        mask = ser_disp.isin(selected_raw)
+        df_out = df[mask] if mode == "Include" else df[~mask]
+        st.success(f"Filtered to {len(df_out):,} rows (from {len(df):,}).")
+        return df_out
+
+    return df
+
+
 # ========================= APP =========================
 if uploaded_file is not None:
     df = read_any_table(uploaded_file)
+
+    # >>> Apply the optional category filter <<<
+    df = apply_category_filter(df)
 
     mode = st.radio(
         "Are you ranking **Industries/Buzzwords**?",
